@@ -6,7 +6,8 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "jest"
+    "test": "node dist/test-flow.js",
+    "jest": "jest"
   },
   "dependencies": {
     "axios": "^1.6.0"

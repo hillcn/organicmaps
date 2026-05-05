@@ -3,8 +3,8 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const WorldMapDownloader_1 = require("./WorldMapDownloader");
 async function main() {
     console.log('=== Organic Maps World/Coast Download Test ===\n');
-    // 创建下载器实例，使用最新版本号
-    const dataVersion = 260505; // 2026年5月5日
+    // 创建下载器实例，使用有效的版本号
+    const dataVersion = 250505; // 2025年5月5日（有效的地图数据版本）
     const downloader = new WorldMapDownloader_1.WorldMapDownloader(dataVersion, './downloads');
     try {
         // 初始化Meta配置
