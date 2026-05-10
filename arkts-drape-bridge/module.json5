@@ -1,0 +1,19 @@
+{
+  "app": {
+    "bundleName": "app.organicmaps.sdk",
+    "vendor": "organicmaps",
+    "versionCode": 1,
+    "versionName": "1.0.0"
+  },
+  "module": {
+    "name": "drape_bridge",
+    "type": "har",
+    "deviceTypes": [
+      "phone",
+      "tablet",
+      "tv",
+      "wearable"
+    ],
+    "dependencies": {}
+  }
+}
