@@ -1,0 +1,27 @@
+[package]
+name = "drape-bridge"
+version = "0.1.0"
+edition = "2021"
+authors = ["OMaps Team"]
+license = "Apache-2.0"
+description = "Rust bindings for Drape graphics abstraction layer"
+
+[dependencies]
+libc = "0.2"
+
+[build-dependencies]
+cbindgen = "0.24"
+
+[lib]
+name = "drape_bridge"
+crate-type = ["staticlib", "cdylib"]
+
+[features]
+default = ["vulkan", "opengl"]
+vulkan = []
+opengl = []
+metal = []
+
+[profile.release]
+lto = true
+opt-level = 3

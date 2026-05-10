@@ -1,10 +1,31 @@
-plugins {
-  id 'com.android.library'
-}
+add_subdirectory(rust-drape-bridge)
 
-apply from: "${rootProject.rootDir}/groovy/common-config.gradle"
+android_library(
+    NAME drape_bridge
+    SRCS
+        drape/backend_registry.cpp
+        drape/gl/gl_resource_factory.cpp
+        drape/gl/gl_backend_register.cpp
+        drape/vulkan/vulkan_resource_factory.cpp
+        drape/vulkan/vulkan_backend_register.cpp
+    PUBLIC_HEADERS
+        drape/backend_registry.hpp
+        drape/resource_factory.hpp
+        drape/gl/gl_resource_factory.hpp
+        drape/vulkan/vulkan_resource_factory.hpp
+    exported_deps
+        libbase
+)
 
-android {
-  namespace = 'app.organicmaps.sdk.maps.world'
-  // enableKotlin = true  // see app/build.gradle
-}
+if(ENABLE_METAL)
+    android_library(
+        NAME drape_bridge_metal
+        SRCS
+            drape/metal/metal_resource_factory.mm
+            drape/metal/metal_backend_register.mm
+        PUBLIC_HEADERS
+            drape/metal/metal_resource_factory.hpp
+        exported_deps
+            drape_bridge
+    )
+endif()
