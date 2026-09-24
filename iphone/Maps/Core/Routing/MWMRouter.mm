@@ -8,6 +8,7 @@
 #import "MWMMapViewControlsManager.h"
 #import "MWMNavigationDashboardManager+Entity.h"
 #import "MWMRoutePoint+CPP.h"
+#import "MWMRoutingManager.h"
 #import "MWMStorage+UI.h"
 #import "MapsAppDelegate.h"
 #import "SwiftBridge.h"
@@ -18,7 +19,10 @@
 #include <CoreApi/StringUtils+Core.h>
 #include <CoreApi/TrackInfo+Core.h>
 
+#include "routing/routing_options.hpp"
+
 #include "kml/type_utils.hpp"
+#include "map/routing_mark.hpp"
 #include "platform/local_country_file_utils.hpp"
 #include "platform/localization.hpp"
 
@@ -68,8 +72,7 @@ using namespace routing;
     return nil;
 
   auto const altitudesInfo = elevationInfo.CalculateAltitudesInfo(ElevationInfo::kDefThresholdMWM);
-  // A zero vertical range collapses the chart's Y-axis transforms, so suppress the preview instead of
-  // showing a misleading flat chart. This matches the previous bitmap-based behavior.
+  // A zero vertical range collapses the chart's Y-axis transforms, so suppress the misleading flat preview.
   if (altitudesInfo.m_maxAltitude == altitudesInfo.m_minAltitude)
     return nil;
 
@@ -197,6 +200,12 @@ using namespace routing;
   return GetFramework().GetRoutingManager().CouldAddIntermediatePoint();
 }
 
++ (BOOL)isRoutePointsLimitReached
+{
+  // Unlike canAddIntermediatePoint, this also works before routing becomes active.
+  return GetFramework().GetRoutingManager().GetRoutePointsCount() >= RoutePointsLayout::kMaxRoutePointsCount;
+}
+
 - (instancetype)initRouter
 {
   self = [super init];
@@ -301,19 +310,24 @@ using namespace routing;
     NSAssert(NO, @"Target point can not be nil");
     return;
   }
-  switch (point.type)
+  if (point.type == MWMRoutePointTypeStart)
   {
-  case MWMRoutePointTypeStart: [self buildFromPoint:newPoint bestRouter:NO]; break;
-  case MWMRoutePointTypeFinish: [self buildToPoint:newPoint bestRouter:NO]; break;
-  case MWMRoutePointTypeIntermediate:
-    RouteMarkData pt = point.routeMarkData;
-    auto & routingManager = GetFramework().GetRoutingManager();
-    routingManager.RemoveRoutePoint(pt.m_pointType, pt.m_intermediateIndex);
-    RouteMarkData newPt = newPoint.routeMarkData;
-    routingManager.AddRoutePoint(std::move(newPt), NO /* reorderIntermediatePoints */);
-    [[MWMNavigationDashboardManager sharedManager] onRoutePointsUpdated];
-    [self rebuildWithBestRouter:NO];
+    [self buildFromPoint:newPoint bestRouter:NO];
+    return;
   }
+  if (point.type == MWMRoutePointTypeFinish)
+  {
+    // Destination setup can add the current location when this is the only route point.
+    [self buildToPoint:newPoint bestRouter:NO];
+    return;
+  }
+
+  auto & routingManager = GetFramework().GetRoutingManager();
+  RouteMarkData pt = point.routeMarkData;
+  RouteMarkData newPt = newPoint.routeMarkData;
+  routingManager.ReplaceRoutePoint(pt.m_pointType, pt.m_intermediateIndex, std::move(newPt));
+  [[MWMNavigationDashboardManager sharedManager] onRoutePointsUpdated];
+  [self rebuildWithBestRouter:NO];
 }
 
 + (void)swapStartAndFinish
@@ -351,7 +365,7 @@ using namespace routing;
   }
 
   RouteMarkData pt = point.routeMarkData;
-  GetFramework().GetRoutingManager().AddRoutePoint(std::move(pt));
+  GetFramework().GetRoutingManager().AddRoutePoint(std::move(pt), RoutingOptions::LoadRouteOptimizationFromSettings());
   [[MWMNavigationDashboardManager sharedManager] onRoutePointsUpdated];
 }
 
@@ -436,7 +450,6 @@ using namespace routing;
 
 + (void)start
 {
-  [self saveRoute];
   auto const doStart = ^{
     auto & rm = GetFramework().GetRoutingManager();
     auto const routePoints = rm.GetRoutePoints();
@@ -448,11 +461,15 @@ using namespace routing;
       CLLocation * lastLocation = [MWMLocationManager lastLocation];
       if (p1.isMyPosition && lastLocation)
       {
-        rm.FollowRoute();
+        [[MWMRoutingManager routingManager] startRoute];
         [[MWMMapViewControlsManager manager] onRouteStart];
       }
       else
       {
+        // The route is not followed here, and only following saves the points, so save them for
+        // restoreRouteIfNeeded.
+        [self saveRoute];
+
         BOOL const needToRebuild = lastLocation && [MWMLocationManager isStarted] && !p2.isMyPosition;
 
         [[MWMAlertViewController activeAlertController]
@@ -488,9 +505,9 @@ using namespace routing;
 
 + (void)doStop:(BOOL)removeRoutePoints
 {
-  GetFramework().GetRoutingManager().CloseRouting(removeRoutePoints);
+  [[MWMRoutingManager routingManager] stopRoutingAndRemoveRoutePoints:removeRoutePoints];
   if (removeRoutePoints)
-    GetFramework().GetRoutingManager().DeleteSavedRoutePoints();
+    [[MWMRoutingManager routingManager] deleteSavedRoutePoints];
 }
 
 - (void)updateFollowingInfo
@@ -556,8 +573,6 @@ using namespace routing;
     if (![MWMRouter IsRouteValid])
       [[MWMNavigationDashboardManager sharedManager] onRouteError:L(@"routing_planning_error")];
     break;
-  case routing::RouterResultCode::RouteFileNotExist:
-  case routing::RouterResultCode::InconsistentMWMandRoute:
   case routing::RouterResultCode::FileTooOld:
   case routing::RouterResultCode::RouteNotFound:
     self.routingOptions = [MWMRoutingOptions new];
@@ -702,6 +717,13 @@ using namespace routing;
   }
   [options save];
   [self rebuildWithBestRouter:YES];
+}
+
++ (void)optimizeRoutePointsAndRebuild
+{
+  // The core keeps the approved order while following or in Ruler mode.
+  if ([self isRoutingActive] && GetFramework().GetRoutingManager().OptimizeRoutePoints())
+    [self rebuildWithBestRouter:NO];
 }
 
 + (void)showNavigationMapControls

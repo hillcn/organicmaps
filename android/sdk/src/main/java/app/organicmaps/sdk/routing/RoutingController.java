@@ -12,6 +12,7 @@ import app.organicmaps.sdk.bookmarks.data.MapObject;
 import app.organicmaps.sdk.location.LocationHelper;
 import app.organicmaps.sdk.util.concurrency.UiThread;
 import app.organicmaps.sdk.util.log.Logger;
+import org.chromium.base.ObserverList;
 
 @androidx.annotation.UiThread
 public class RoutingController
@@ -33,6 +34,14 @@ public class RoutingController
     ERROR
   }
 
+  private record PendingPoiPick(@NonNull RouteMarkType pointType, @Nullable Integer replaceStopIndex)
+  {
+    private boolean isReplacement()
+    {
+      return replaceStopIndex != null;
+    }
+  }
+
   public interface Container
   {
     default void showRoutePlan(boolean show, @Nullable Runnable completionListener) {}
@@ -44,6 +53,7 @@ public class RoutingController
     default void onPlanningStarted() {}
     default void onAddedStop() {}
     default void onRemovedStop() {}
+    default void onStopPointLimitReached() {}
     default void onPoiPickCompleted() {}
     default void onResetToPlanningState() {}
     default void onBuiltRoute() {}
@@ -59,19 +69,32 @@ public class RoutingController
     default void onStartRouteBuilding() {}
   }
 
+  /**
+   * Process-scoped observer of navigation start/stop, independent of the UI {@link Container}. Fires
+   * on every transition into or out of {@link State#NAVIGATION}, whatever the trigger -- phone UI,
+   * Android Auto, notification stop, or route finished.
+   */
+  public interface NavigationStateListener
+  {
+    void onNavigationStateChanged(boolean active);
+  }
+
   private static final RoutingController sInstance = new RoutingController();
 
   @Nullable
   private Container mContainer;
 
+  @NonNull
+  private final ObserverList<NavigationStateListener> mNavigationStateListeners = new ObserverList<>();
+
   private BuildState mBuildState = BuildState.NONE;
   private State mState = State.NONE;
   @Nullable
-  private RouteMarkType mWaitingPoiPickType = null;
+  private PendingPoiPick mPendingPoiPick;
+  // Set with the pick it belongs to and cleared with it, in armPoiPick() and resetPoiPickState().
+  private boolean mCanPickMyPosition;
   private int mLastBuildProgress;
   private Router mLastRouterType;
-  private boolean isPoiPickReplaceStop;
-  private int mReplaceStopIndex = -1;
   private boolean mHasContainerSavedState;
   private boolean mContainsCachedResult;
   private int mLastResultCode;
@@ -183,10 +206,28 @@ public class RoutingController
   private void setState(State newState)
   {
     Logger.d(TAG, "[S] State: " + mState + " -> " + newState + ", BuildState: " + mBuildState);
+    final boolean wasNavigating = mState == State.NAVIGATION;
     mState = newState;
+    final boolean isNavigating = mState == State.NAVIGATION;
+
+    if (isNavigating != wasNavigating)
+    {
+      for (final NavigationStateListener listener : mNavigationStateListeners)
+        listener.onNavigationStateChanged(isNavigating);
+    }
 
     if (mContainer != null)
       mContainer.updateMenu();
+  }
+
+  public void addNavigationStateListener(@NonNull NavigationStateListener listener)
+  {
+    mNavigationStateListeners.addObserver(listener);
+  }
+
+  public void removeNavigationStateListener(@NonNull NavigationStateListener listener)
+  {
+    mNavigationStateListeners.removeObserver(listener);
   }
 
   private void setBuildState(BuildState newState)
@@ -373,8 +414,10 @@ public class RoutingController
   }
   public void replaceStop(@NonNull MapObject mapObject)
   {
-    RouteMarkType type = mWaitingPoiPickType != null ? mWaitingPoiPickType : RouteMarkType.Intermediate;
-    replaceRoutePoint(type, mapObject, mReplaceStopIndex);
+    final PendingPoiPick pick = requirePendingPoiPick();
+    if (!pick.isReplacement())
+      throw new IllegalStateException("A route point replacement was not requested");
+    replaceRoutePoint(pick.pointType(), mapObject, pick.replaceStopIndex());
     build();
     if (mContainer != null)
       mContainer.onAddedStop();
@@ -384,7 +427,15 @@ public class RoutingController
 
   public void addStop(@NonNull MapObject mapObject)
   {
-    addRoutePoint(RouteMarkType.Intermediate, mapObject);
+    if (!addRoutePoint(RouteMarkType.Intermediate, mapObject))
+    {
+      if (mContainer != null)
+        mContainer.onStopPointLimitReached();
+      // Rejection completes the pending pick too, so its overlay is dismissed with the controls it owns.
+      finalizePendingPoiPick();
+      return;
+    }
+
     build();
     if (mContainer != null)
       mContainer.onAddedStop();
@@ -404,6 +455,7 @@ public class RoutingController
     if (mContainer != null)
       mContainer.onRemovedStop();
     resetToPlanningStateIfNavigating();
+    resetPoiPickState();
   }
 
   public void launchPlanning()
@@ -452,7 +504,7 @@ public class RoutingController
 
   public boolean isPoiPickReplaceStop()
   {
-    return isPoiPickReplaceStop;
+    return mPendingPoiPick != null && mPendingPoiPick.isReplacement();
   }
 
   public boolean isRoutePoint(@NonNull MapObject mapObject)
@@ -608,13 +660,18 @@ public class RoutingController
 
   public void waitForPoiPick(@NonNull RouteMarkType pointType)
   {
-    mWaitingPoiPickType = pointType;
+    armPoiPick(pointType, null);
   }
 
-  public void replaceStopPoiPick(int index)
+  public void waitForPoiReplacement(@NonNull RouteMarkType pointType, int index)
   {
-    mReplaceStopIndex = index;
-    isPoiPickReplaceStop = true;
+    armPoiPick(pointType, index);
+  }
+
+  private void armPoiPick(@NonNull RouteMarkType pointType, @Nullable Integer replaceStopIndex)
+  {
+    mPendingPoiPick = new PendingPoiPick(pointType, replaceStopIndex);
+    mCanPickMyPosition = computeCanPickMyPosition(mPendingPoiPick);
   }
 
   private void finalizePendingPoiPick()
@@ -626,18 +683,51 @@ public class RoutingController
       mContainer.onPoiPickCompleted();
   }
 
-  // Clears the pending POI-pick selection in one place. The replace-stop index/flag must be cleared together
-  // with the waiting type, otherwise a cancelled replace leaks its index into the next, unrelated pick.
   private void resetPoiPickState()
   {
-    mWaitingPoiPickType = null;
-    isPoiPickReplaceStop = false;
-    mReplaceStopIndex = -1;
+    mPendingPoiPick = null;
+    mCanPickMyPosition = false;
   }
 
   public boolean isWaitingPoiPick()
   {
-    return mWaitingPoiPickType != null;
+    return mPendingPoiPick != null;
+  }
+
+  @NonNull
+  private PendingPoiPick requirePendingPoiPick()
+  {
+    if (mPendingPoiPick == null)
+      throw new IllegalStateException("A route point pick was not requested");
+    return mPendingPoiPick;
+  }
+
+  // A pick overwrites the point of its own slot, so a my-position point standing there is replaced by it
+  // rather than duplicated. Adding a stop overwrites nothing.
+  private static boolean isReplacedByPick(@NonNull RouteMarkData point, @NonNull PendingPoiPick pick)
+  {
+    if (point.mPointType != pick.pointType())
+      return false;
+    if (pick.pointType() != RouteMarkType.Intermediate)
+      return true;
+    return pick.isReplacement() && point.mIntermediateIndex == pick.replaceStopIndex();
+  }
+
+  // The core keeps a single my-position mark, so adding it to a second slot pulls it out of the one it
+  // already holds (RoutingManager::AddRoutePoint), silently emptying that one. The shortcut is offered only
+  // where the route has no such point, or where the pick replaces the one it has. Answered once per pick:
+  // the route cannot be edited while one is armed, and the caller asks on every location update.
+  private static boolean computeCanPickMyPosition(@NonNull PendingPoiPick pick)
+  {
+    for (RouteMarkData point : Framework.nativeGetRoutePoints())
+      if (point.mIsMyPosition && !isReplacedByPick(point, pick))
+        return false;
+    return true;
+  }
+
+  public boolean canPickMyPosition()
+  {
+    return mCanPickMyPosition;
   }
 
   public BuildState getBuildState()
@@ -701,6 +791,8 @@ public class RoutingController
     if (hasOnePointAtLeast)
       applyRemovingIntermediatePointsTransaction();
 
+    // The result is unread on purpose: the core drops the point standing in the slot before adding, so only
+    // addStop() can run the route out of capacity.
     if (hasStart)
       addRoutePoint(RouteMarkType.Start, startPoint);
 
@@ -826,22 +918,21 @@ public class RoutingController
     checkAndBuildRoute();
     return true;
   }
+
   private static void replaceRoutePoint(@NonNull RouteMarkType type, @NonNull MapObject point, int replaceStopIndex)
   {
     Pair<String, String> description = getDescriptionForPoint(point);
-    if (type == RouteMarkType.Intermediate)
-      Framework.nativeRemoveRoutePoint(type, replaceStopIndex);
-    Framework.nativeAddRoutePoint(description.first /* title */, description.second /* subtitle */, type,
-                                  replaceStopIndex /* intermediateIndex */, point.isMyPosition(), point.getLat(),
-                                  point.getLon(), false /* reorderIntermediatePoints */);
+    Framework.nativeReplaceRoutePoint(description.first /* title */, description.second /* subtitle */, type,
+                                      replaceStopIndex /* intermediateIndex */, point.isMyPosition(), point.getLat(),
+                                      point.getLon());
   }
 
-  private static void addRoutePoint(@NonNull RouteMarkType type, @NonNull MapObject point)
+  private static boolean addRoutePoint(@NonNull RouteMarkType type, @NonNull MapObject point)
   {
     Pair<String, String> description = getDescriptionForPoint(point);
-    Framework.nativeAddRoutePoint(description.first /* title */, description.second /* subtitle */, type,
-                                  0 /* intermediateIndex */, point.isMyPosition(), point.getLat(), point.getLon(),
-                                  true /* reorderIntermediatePoints */);
+    return Framework.nativeAddRoutePoint(description.first /* title */, description.second /* subtitle */, type,
+                                         point.isMyPosition(), point.getLat(), point.getLon(),
+                                         true /* allowOptimization */);
   }
 
   @NonNull
@@ -929,18 +1020,19 @@ public class RoutingController
 
   public void onPoiSelected(@Nullable MapObject point)
   {
-    if (!isWaitingPoiPick())
+    final PendingPoiPick pick = mPendingPoiPick;
+    if (pick == null)
       return;
 
     if (point != null)
     {
-      if (isPoiPickReplaceStop)
+      if (pick.isReplacement())
         replaceStop(point);
-      else if (mWaitingPoiPickType == RouteMarkType.Finish)
+      else if (pick.pointType() == RouteMarkType.Finish)
         setEndPoint(point);
-      else if (mWaitingPoiPickType == RouteMarkType.Start)
+      else if (pick.pointType() == RouteMarkType.Start)
         setStartPoint(point);
-      else if (mWaitingPoiPickType == RouteMarkType.Intermediate)
+      else if (pick.pointType() == RouteMarkType.Intermediate)
         addStop(point);
     }
 
@@ -956,6 +1048,6 @@ public class RoutingController
   @Nullable
   public RouteMarkType getWaitingPoiPickType()
   {
-    return mWaitingPoiPickType;
+    return mPendingPoiPick == null ? null : mPendingPoiPick.pointType();
   }
 }

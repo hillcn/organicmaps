@@ -104,6 +104,8 @@ public class PlacePageController
           if (PlacePageUtils.isHiddenState(newState))
           {
             mEasyDismissEnabled = false;
+            // Clear before onHiddenInternal(): it may restore a transit PP, which sets the flag again.
+            mPlacePageListener.onPlacePageActiveChanged(false);
             onHiddenInternal();
           }
         }
@@ -255,8 +257,13 @@ public class PlacePageController
   private void close()
   {
     setPlacePageInteractions(false);
-    mPlacePageBehavior.setState(BottomSheetBehavior.STATE_HIDDEN);
-    mPlacePageListener.onPlacePageActiveChanged(false);
+    // Normally the flag is cleared in onStateChanged(HIDDEN), but setState() fires no callback when
+    // the sheet is already hidden: on re-entry from onHiddenInternal() -> setMapObject(null) ->
+    // onChanged(null), which happens on every close, and when dismissed before the open animation.
+    if (PlacePageUtils.isHiddenState(mPlacePageBehavior.getState()))
+      mPlacePageListener.onPlacePageActiveChanged(false);
+    else
+      mPlacePageBehavior.setState(BottomSheetBehavior.STATE_HIDDEN);
   }
 
   private void resetPlacePageHeightBounds()
@@ -474,8 +481,12 @@ public class PlacePageController
 
   void showTrackDeleteAlertDialog()
   {
-    if (mMapObject == null)
+    if (!(mMapObject instanceof Track track))
+    {
+      dismissAlertDialog();
       return;
+    }
+    final long trackId = track.getTrackId();
     dismissAlertDialog();
     mViewModel.isAlertDialogShowing = true;
     if (mAlertDialog != null)
@@ -483,25 +494,21 @@ public class PlacePageController
       mAlertDialog.show();
       return;
     }
-    mAlertDialog = new MaterialAlertDialogBuilder(requireContext(), R.style.MwmTheme_AlertDialog)
-                       .setTitle(requireContext().getString(R.string.delete_track_dialog_title, mMapObject.getTitle()))
-                       .setCancelable(true)
-                       .setNegativeButton(R.string.cancel, null)
-                       .setPositiveButton(R.string.delete,
-                                          (dialog, which) -> {
-                                            BookmarkManager.INSTANCE.deleteTrack(((Track) mMapObject).getTrackId());
-                                            close();
-                                          })
-                       .setOnDismissListener(dialog -> dismissAlertDialog())
-                       .show();
+    mAlertDialog =
+        new MaterialAlertDialogBuilder(requireContext(), R.style.MwmTheme_AlertDialog)
+            .setTitle(requireContext().getString(R.string.delete_track_dialog_title, track.getTitle()))
+            .setCancelable(true)
+            .setNegativeButton(R.string.cancel, null)
+            .setPositiveButton(R.string.delete, (dialog, which) -> BookmarkManager.INSTANCE.deleteTrack(trackId))
+            .setOnDismissListener(dialog -> dismissAlertDialog())
+            .show();
   }
 
   void dismissAlertDialog()
   {
-    if (mAlertDialog == null)
-      return;
-    mAlertDialog.dismiss();
     mViewModel.isAlertDialogShowing = false;
+    if (mAlertDialog != null)
+      mAlertDialog.dismiss();
   }
 
   private void onBackBtnClicked()
@@ -738,7 +745,11 @@ public class PlacePageController
         onTrackRecordingSelected();
     }
     else
+    {
+      // The track deletion confirmation needs the current selection.
+      dismissAlertDialog();
       close();
+    }
   }
 
   @Override

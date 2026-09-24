@@ -13,31 +13,15 @@ if (PLATFORM_MAC)
   include(CheckLanguage)
   include(MetalShaderSupport)
 
-  # The Metal compiler lives in an on-demand cryptex mount whose path contains a
-  # suffix that changes on every remount, so a cached path goes dead. Drop it and
-  # let check_language() retry, as it skips detection when the variable is set,
-  # together with the compiler info file, which enable_language() would otherwise
-  # load in place of the freshly detected path.
+  # The Metal compiler lives in an on-demand cryptex mount whose path suffix changes on
+  # every remount, so a cached path goes dead. check_language() skips detection while the
+  # variable is set (NOTFOUND included), and enable_language() would reuse the dead path
+  # recorded in the info file, which upstream re-resolves only at an unchanged version.
   if (NOT EXISTS "${CMAKE_Metal_COMPILER}")
     unset(CMAKE_Metal_COMPILER CACHE)
     file(REMOVE "${CMAKE_PLATFORM_INFO_DIR}/CMakeMetalCompiler.cmake")
   endif()
   check_language(Metal)
-
-  # While that mount is down xcrun answers with a stub in XcodeDefault.xctoolchain
-  # that does exist but fails to run. check_language()'s try_compile rejects it,
-  # except with the Xcode generator, where CMakeTestMetalCompiler assumes a
-  # working compiler and skips the test, so probe it directly. Clear the cache as
-  # well, otherwise the stub would be picked up again once the mount is back.
-  if (CMAKE_Metal_COMPILER)
-    execute_process(COMMAND "${CMAKE_Metal_COMPILER}" --version
-                    RESULT_VARIABLE METAL_COMPILER_RUNS OUTPUT_QUIET ERROR_QUIET)
-    if (NOT METAL_COMPILER_RUNS EQUAL 0)
-      unset(CMAKE_Metal_COMPILER CACHE)
-      unset(CMAKE_Metal_COMPILER)
-      file(REMOVE "${CMAKE_PLATFORM_INFO_DIR}/CMakeMetalCompiler.cmake")
-    endif()
-  endif()
 
   if (NOT CMAKE_Metal_COMPILER)
     # The shaders target below would still be generated, but with unexpanded rule
@@ -128,38 +112,36 @@ set(RESOURCES_FOLDER ${BUNDLE_FOLDER}/Contents/Resources)
 set(DATA_DIR ${OMIM_ROOT}/data)
 
 function(copy_resources)
-  execute_process(COMMAND mkdir -p ${RESOURCES_FOLDER})
   foreach(file ${ARGN})
-    execute_process(
-      COMMAND cp -r ${DATA_DIR}/${file} ${RESOURCES_FOLDER}
-      COMMAND_ERROR_IS_FATAL ANY
-    )
+    file(COPY ${DATA_DIR}/${file} DESTINATION ${RESOURCES_FOLDER})
   endforeach()
 endfunction()
 
-copy_resources(
-  fonts
-  symbols
-  countries-strings
-  vulkan_shaders
+# The bundle resources are only read on macOS, the other platforms resolve the data directory at run time.
+if (PLATFORM_MAC)
+  copy_resources(
+    fonts
+    symbols
+    countries-strings
+    vulkan_shaders
 
-  categories.txt
-  categories_cuisines.txt
-  classificator.txt
-  colors.txt
-  countries.json
-  drules_default.bin
-  drules_outdoors.bin
-  drules_vehicle.bin
-  editor.config
-  packed_polygons.bin
-  patterns.txt
-  transit_colors.txt
-  types.txt
-  World.mwm
-  WorldCoasts.mwm
-)
-
-if (NOT WITH_SYSTEM_PROVIDED_3PARTY)
-  copy_resources(icudt78l.dat)
+    categories.txt
+    categories_cuisines.txt
+    classificator.txt
+    colors.txt
+    countries.json
+    drules_default.bin
+    drules_outdoors.bin
+    drules_vehicle.bin
+    editor.config
+    packed_polygons.bin
+    patterns.txt
+    transit_colors.txt
+    types.txt
+    World.mwm
+    WorldCoasts.mwm
+  )
+  if (NOT WITH_SYSTEM_PROVIDED_3PARTY)
+    copy_resources(icudt78l.dat)
+  endif()
 endif()

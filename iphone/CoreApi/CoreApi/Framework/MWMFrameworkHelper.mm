@@ -204,8 +204,49 @@ static Framework::ProductsPopupCloseReason ConvertProductPopupCloseReasonToCore(
 
 + (BOOL)canEditMapAtViewportCenter
 {
-  auto const & f = GetFramework();
-  return f.CanEditMapForPosition(f.GetViewportCenter());
+  return [self canEditMapAtMercatorPoint:[self mercatorViewportCenter]];
+}
+
++ (BOOL)canEditMapAtMercatorPoint:(CGPoint)point
+{
+  return GetFramework().CanEditMapForPosition(m2::PointD(point.x, point.y));
+}
+
++ (void)startChoosePositionModeWithEnableBounds:(BOOL)enableBounds
+                        initialMercatorPosition:(NSValue *)initialMercatorPosition
+                           shouldChangeViewport:(BOOL)shouldChangeViewport
+{
+  m2::PointD position;
+  m2::PointD const * optionalPosition = nullptr;
+  if (initialMercatorPosition)
+  {
+    CGPoint const point = initialMercatorPosition.CGPointValue;
+    position = {point.x, point.y};
+    optionalPosition = &position;
+  }
+
+  auto & framework = GetFramework();
+  framework.EnableChoosePositionMode(true /* enable */, enableBounds, optionalPosition, shouldChangeViewport);
+  framework.BlockTapEvents(true);
+}
+
++ (void)stopChoosePositionMode
+{
+  auto & framework = GetFramework();
+  framework.EnableChoosePositionMode(false /* enable */, false /* enableBounds */, nullptr /* optionalPosition */);
+  framework.BlockTapEvents(false);
+}
+
++ (CGPoint)mercatorViewportCenter
+{
+  auto const center = GetFramework().GetViewportCenter();
+  return CGPointMake(center.x, center.y);
+}
+
++ (NSString *)addressAtMercatorPoint:(CGPoint)point
+{
+  auto const address = GetFramework().GetAddressAtPoint(m2::PointD(point.x, point.y)).FormatAddress();
+  return address.empty() ? nil : @(address.c_str());
 }
 
 + (void)showOnMap:(MWMMarkGroupID)categoryId
@@ -236,6 +277,10 @@ static Framework::ProductsPopupCloseReason ConvertProductPopupCloseReasonToCore(
 + (void)updateAfterDeleteBookmark
 {
   auto & frm = GetFramework();
+  // A batch deletion may already have closed the Place Page.
+  if (!frm.HasPlacePageInfo())
+    return;
+
   auto buildInfo = frm.GetCurrentPlacePageInfo().GetBuildInfo();
   buildInfo.m_match = place_page::BuildInfo::Match::FeatureOnly;
   buildInfo.m_userMarkId = kml::kInvalidMarkId;
@@ -289,8 +334,11 @@ static Framework::ProductsPopupCloseReason ConvertProductPopupCloseReasonToCore(
   return GetFramework().IsTrackRecordingEmpty();
 }
 
-+ (ElevationProfileData * _Nonnull)trackRecordingElevationInfo
++ (ElevationProfileData * _Nullable)trackRecordingElevationInfo
 {
+  if (GetFramework().IsTrackRecordingEmpty())
+    return nil;
+
   return [[ElevationProfileData alloc] initWithElevationInfo:GetFramework().GetTrackRecordingElevationInfo()];
 }
 
